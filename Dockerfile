@@ -1,5 +1,48 @@
-# ── Stage 1: Dependencies ─────────────────────────────────────────────────────
-FROM node:20-slim AS deps
+# ── Base: System dependencies ─────────────────────────────────────────────────
+FROM node:20-slim AS base
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libc6 \
+    libcairo2 \
+    libcups2 \
+    libdbus-1-3 \
+    libexpat1 \
+    libfontconfig1 \
+    libgbm1 \
+    libgcc1 \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libstdc++6 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
+    lsb-release \
+    wget \
+    xdg-utils \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Stage 1: Dependencies + Playwright browser download ──────────────────────
+FROM base AS deps
 
 WORKDIR /app
 
@@ -7,45 +50,26 @@ COPY package*.json ./
 
 RUN npm ci --omit=dev
 
+# Download Playwright's Chromium into the image
+RUN npx playwright install chromium
+
 # ── Stage 2: Production Image ─────────────────────────────────────────────────
-FROM node:20-slim AS production
-
-# Install Chromium dependencies
-RUN apt-get update && apt-get install -y \
-    chromium \
-    fonts-liberation \
-    libappindicator3-1 \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libgdk-pixbuf2.0-0 \
-    libnspr4 \
-    libnss3 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    xdg-utils \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# Tell Playwright to use the system Chromium instead of downloading its own
-ENV PLAYWRIGHT_BROWSERS_PATH=/usr/bin
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV CHROMIUM_PATH=/usr/bin/chromium
+FROM base AS production
 
 WORKDIR /app
 
-# Copy deps from stage 1
+# Copy deps and Playwright browsers from stage 1
 COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /root/.cache/ms-playwright /root/.cache/ms-playwright
 
 # Copy source
 COPY . .
 
 # Run as non-root for security
-RUN groupadd -r ichabod && useradd -r -g ichabod ichabod
+RUN groupadd -r ichabod && useradd -r -g ichabod ichabod \
+    && chown -R ichabod:ichabod /app \
+    && chown -R ichabod:ichabod /root/.cache/ms-playwright
+
 USER ichabod
 
 EXPOSE 3000
