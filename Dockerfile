@@ -44,23 +44,28 @@ RUN apt-get update && apt-get install -y \
 # ── Stage 1: Dependencies + Playwright browser download ──────────────────────
 FROM base AS deps
 
+# Set a fixed browser path accessible to any user
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 WORKDIR /app
 
 COPY package*.json ./
 
 RUN npm ci --omit=dev
 
-# Download Playwright's Chromium into the image
+# Download Playwright's Chromium to the fixed path
 RUN npx playwright install chromium
 
 # ── Stage 2: Production Image ─────────────────────────────────────────────────
 FROM base AS production
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 WORKDIR /app
 
 # Copy deps and Playwright browsers from stage 1
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /root/.cache/ms-playwright /root/.cache/ms-playwright
+COPY --from=deps /ms-playwright /ms-playwright
 
 # Copy source
 COPY . .
@@ -68,7 +73,7 @@ COPY . .
 # Run as non-root for security
 RUN groupadd -r ichabod && useradd -r -g ichabod ichabod \
     && chown -R ichabod:ichabod /app \
-    && chown -R ichabod:ichabod /root/.cache/ms-playwright
+    && chmod -R 755 /ms-playwright
 
 USER ichabod
 
