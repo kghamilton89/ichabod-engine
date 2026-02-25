@@ -18,7 +18,7 @@ const config = {
   },
 
   auth: {
-    apiKey: optional('ICHABOD_API_KEY', null), // null = auth disabled in dev
+    apiKey: process.env.ICHABOD_API_KEY || null, // null = auth disabled in dev
   },
 
   browser: {
