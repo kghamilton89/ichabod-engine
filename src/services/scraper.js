@@ -1,7 +1,7 @@
 /**
  * Ichabod Engine - Scraper Service
- * Core execution engine. Takes a recipe, runs it against a live page,
- * and returns structured results.
+ * Core execution engine. Tries local Chromium first, falls back to
+ * Browserless automatically on failure if configured.
  */
 
 'use strict';
@@ -13,24 +13,21 @@ const config = require('../../config');
 const logger = require('../utils/logger');
 
 /**
- * Execute a single scrape recipe
- * @param {object} recipe - Validated recipe from the controller
+ * Execute a scrape using a given page factory function
+ * @param {Function} pageFactory - browser.newPage or browser.newRemotePage
+ * @param {object} recipe
  * @returns {object} - { items, meta }
  */
-const run = async (recipe) => {
-  const { page, context } = await browser.newPage();
+const executeRecipe = async (pageFactory, recipe) => {
+  const { page, context } = await pageFactory();
   const startedAt = Date.now();
 
   try {
-    logger.info({ url: recipe.url }, 'Scrape started');
-
-    // Navigate to target URL
     await page.goto(recipe.url, {
       waitUntil: recipe.options.waitUntil,
       timeout: recipe.options.timeout ?? config.browser.navigationTimeout,
     });
 
-    // Wait for a specific element before proceeding
     if (recipe.waitFor) {
       await page.waitForSelector(recipe.waitFor, {
         state: 'visible',
@@ -38,35 +35,15 @@ const run = async (recipe) => {
       });
     }
 
-    // Execute pre-extraction actions (scroll, click, type, etc.)
     if (recipe.actions.length > 0) {
       await executeAll(page, recipe.actions);
     }
 
-    // Extract data
     const data = await extractAll(page, recipe.extract);
-
-    // Normalise into an array of items
-    // If the recipe used a selector extractor, data will already be an array
-    // Otherwise wrap flat fields into a single-item array
     const items = normalise(data);
-
     const duration = Date.now() - startedAt;
 
-    logger.info(
-      { url: recipe.url, items: items.length, duration },
-      'Scrape complete'
-    );
-
-    return {
-      items,
-      meta: {
-        url: recipe.url,
-        itemCount: items.length,
-        duration,
-        scrapedAt: new Date().toISOString(),
-      },
-    };
+    return { items, duration };
 
   } finally {
     await browser.closePage(page, context);
@@ -74,19 +51,74 @@ const run = async (recipe) => {
 };
 
 /**
- * Execute a recipe across multiple pages
- * @param {object} recipe         - Validated recipe
- * @param {object} pagination     - { selector, waitFor, maxPages }
+ * Run a scrape recipe with automatic Browserless fallback
+ */
+const run = async (recipe) => {
+  logger.info({ url: recipe.url }, 'Scrape started');
+
+  try {
+    const { items, duration } = await executeRecipe(browser.newPage, recipe);
+
+    logger.info({ url: recipe.url, items: items.length, duration }, 'Scrape complete');
+
+    return {
+      items,
+      meta: {
+        url: recipe.url,
+        itemCount: items.length,
+        duration,
+        usedFallback: false,
+        scrapedAt: new Date().toISOString(),
+      },
+    };
+
+  } catch (localErr) {
+    logger.warn({ url: recipe.url, err: localErr.message }, 'Local browser failed — trying Browserless');
+
+    if (!config.browser.browserlessWsEndpoint) {
+      throw localErr;
+    }
+
+    const { items, duration } = await executeRecipe(browser.newRemotePage, recipe);
+
+    logger.info({ url: recipe.url, items: items.length, duration }, 'Scrape complete via Browserless');
+
+    return {
+      items,
+      meta: {
+        url: recipe.url,
+        itemCount: items.length,
+        duration,
+        usedFallback: true,
+        scrapedAt: new Date().toISOString(),
+      },
+    };
+  }
+};
+
+/**
+ * Run a paginated scrape with automatic Browserless fallback
  */
 const runPaginated = async (recipe, pagination) => {
-  const { page, context } = await browser.newPage();
+  logger.info({ url: recipe.url }, 'Paginated scrape started');
+
+  const pageFactory = async () => {
+    try {
+      return await browser.newPage();
+    } catch (err) {
+      if (!config.browser.browserlessWsEndpoint) throw err;
+      logger.warn({ err: err.message }, 'Local browser failed — trying Browserless');
+      return browser.newRemotePage();
+    }
+  };
+
+  const { page, context } = await pageFactory();
   const startedAt = Date.now();
   const allItems = [];
   const maxPages = pagination.maxPages ?? config.scrape.maxPaginationDepth;
+  let usedFallback = false;
 
   try {
-    logger.info({ url: recipe.url, maxPages }, 'Paginated scrape started');
-
     await page.goto(recipe.url, {
       waitUntil: recipe.options.waitUntil,
       timeout: recipe.options.timeout ?? config.browser.navigationTimeout,
@@ -109,28 +141,22 @@ const runPaginated = async (recipe, pagination) => {
       }
 
       const data = await extractAll(page, recipe.extract);
-      const items = normalise(data);
-      allItems.push(...items);
+      allItems.push(...normalise(data));
 
-      // Try to go to next page
       const paginate = require('../actions/paginate');
       const hasNext = await paginate(page, {
         selector: pagination.selector,
         waitFor: pagination.waitFor,
       });
 
-      if (!hasNext) {
-        logger.debug({ currentPage }, 'No next page found — stopping');
-        break;
-      }
-
+      if (!hasNext) break;
       currentPage++;
     }
 
     const duration = Date.now() - startedAt;
 
     logger.info(
-      { url: recipe.url, items: allItems.length, pages: currentPage, duration },
+      { url: recipe.url, items: allItems.length, duration },
       'Paginated scrape complete'
     );
 
@@ -139,8 +165,9 @@ const runPaginated = async (recipe, pagination) => {
       meta: {
         url: recipe.url,
         itemCount: allItems.length,
-        pagesScraped: currentPage,
+        pagesScraped: allItems.length > 0 ? Math.ceil(allItems.length / 10) : 1,
         duration,
+        usedFallback,
         scrapedAt: new Date().toISOString(),
       },
     };
@@ -152,8 +179,6 @@ const runPaginated = async (recipe, pagination) => {
 
 /**
  * Normalise extracted data into a consistent array format
- * If one of the fields is an array of objects (from selector extractor),
- * use that as the items array. Otherwise wrap flat data in a single item.
  */
 const normalise = (data) => {
   for (const key of Object.keys(data)) {

@@ -1,8 +1,7 @@
 /**
  * Ichabod Engine - Discovery Service
  * Fetches a page and returns cleaned HTML for LLM analysis.
- * Used by the n8n discovery workflow to identify selectors
- * and validate candidate URLs.
+ * Tries local Chromium first, falls back to Browserless on failure.
  */
 
 'use strict';
@@ -13,45 +12,63 @@ const config = require('../../config');
 const logger = require('../utils/logger');
 
 /**
- * Fetch a URL and return cleaned HTML ready for LLM consumption
- * @param {string} url
- * @param {object} options
- * @param {string} [options.waitUntil]  - Playwright navigation event
- * @param {number} [options.timeout]    - Navigation timeout in ms
- * @param {boolean} [options.fullPage]  - Skip sanitization, return raw HTML
- * @returns {object} - { html, meta }
+ * Core fetch logic — runs against a given page
+ */
+const fetchWithPage = async (page, url, options = {}) => {
+  const response = await page.goto(url, {
+    waitUntil: options.waitUntil ?? 'networkidle',
+    timeout: options.timeout ?? config.discovery.candidateUrlTimeout,
+  });
+
+  const statusCode = response?.status() ?? null;
+  const resolvedUrl = page.url();
+  const rawHtml = await page.content();
+  const title = await page.title();
+  const html = options.fullPage ? rawHtml : sanitize(rawHtml);
+
+  return { html, rawHtml, resolvedUrl, title, statusCode };
+};
+
+/**
+ * Fetch a URL and return cleaned HTML ready for LLM consumption.
+ * Auto-falls back to Browserless if local Chromium fails.
  */
 const fetch = async (url, options = {}) => {
-  const { page, context } = await browser.newPage();
+  logger.info({ url }, 'Discovery fetch started');
   const startedAt = Date.now();
 
+  let page, context, usedFallback = false;
+
   try {
-    logger.info({ url }, 'Discovery fetch started');
+    ({ page, context } = await browser.newPage());
+  } catch (err) {
+    if (!config.browser.browserlessWsEndpoint) throw err;
+    logger.warn({ err: err.message }, 'Local browser failed — trying Browserless');
+    ({ page, context } = await browser.newRemotePage());
+    usedFallback = true;
+  }
 
-    const response = await page.goto(url, {
-      waitUntil: options.waitUntil ?? 'networkidle',
-      timeout: options.timeout ?? config.discovery.candidateUrlTimeout,
-    });
+  try {
+    let result;
 
-    const statusCode = response?.status() ?? null;
+    try {
+      result = await fetchWithPage(page, url, options);
+    } catch (err) {
+      if (!config.browser.browserlessWsEndpoint || usedFallback) throw err;
 
-    // Capture final URL after any redirects
-    const resolvedUrl = page.url();
+      logger.warn({ url, err: err.message }, 'Local fetch failed — retrying via Browserless');
+      await browser.closePage(page, context);
 
-    // Get the full rendered HTML (post JS execution)
-    const rawHtml = await page.content();
-
-    // Get page title for context
-    const title = await page.title();
-
-    const html = options.fullPage
-      ? rawHtml
-      : sanitize(rawHtml);
+      ({ page, context } = await browser.newRemotePage());
+      usedFallback = true;
+      result = await fetchWithPage(page, url, options);
+    }
 
     const duration = Date.now() - startedAt;
+    const { html, rawHtml, resolvedUrl, title, statusCode } = result;
 
     logger.info(
-      { url, resolvedUrl, statusCode, htmlLength: html.length, duration },
+      { url, resolvedUrl, statusCode, htmlLength: html.length, duration, usedFallback },
       'Discovery fetch complete'
     );
 
@@ -65,6 +82,7 @@ const fetch = async (url, options = {}) => {
         htmlLength: html.length,
         rawHtmlLength: rawHtml.length,
         duration,
+        usedFallback,
         fetchedAt: new Date().toISOString(),
       },
     };
@@ -75,12 +93,7 @@ const fetch = async (url, options = {}) => {
 };
 
 /**
- * Poll a list of candidate URLs and return results for each
- * Used by the n8n discovery workflow to identify the correct URL
- * from a list of LLM-suggested candidates
- * @param {string[]} urls
- * @param {object} options
- * @returns {object[]} - Array of { url, success, html, meta, error }
+ * Poll a list of candidate URLs — returns results for each
  */
 const pollCandidates = async (urls, options = {}) => {
   const results = [];
@@ -88,11 +101,7 @@ const pollCandidates = async (urls, options = {}) => {
   for (const url of urls) {
     try {
       const result = await fetch(url, options);
-      results.push({
-        url,
-        success: true,
-        ...result,
-      });
+      results.push({ url, success: true, ...result });
     } catch (err) {
       logger.warn({ url, err: err.message }, 'Candidate URL failed');
       results.push({

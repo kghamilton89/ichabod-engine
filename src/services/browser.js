@@ -1,7 +1,7 @@
 /**
  * Ichabod Engine - Browser Service
- * Manages a single Playwright browser instance shared across all requests.
- * Handles lifecycle: launch, page creation, crash recovery.
+ * Manages a single local Playwright browser instance shared across requests.
+ * Falls back to Browserless via CDP when local Chromium fails.
  */
 
 'use strict';
@@ -14,14 +14,12 @@ let browser = null;
 let isLaunching = false;
 let activePages = 0;
 
-/**
- * Launch the browser if not already running
- */
+// ── Local Browser ─────────────────────────────────────────────────────────────
+
 const launch = async () => {
   if (browser?.isConnected()) return browser;
 
   if (isLaunching) {
-    // Wait for the in-progress launch rather than launching twice
     await new Promise((resolve) => setTimeout(resolve, 500));
     return launch();
   }
@@ -35,7 +33,7 @@ const launch = async () => {
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',  // Required in Docker
+        '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-first-run',
         '--no-zygote',
@@ -55,19 +53,30 @@ const launch = async () => {
   }
 };
 
-/**
- * Create a new page with standard configuration
- */
-const newPage = async () => {
-  if (activePages >= config.browser.maxConcurrentPages) {
-    throw new Error(
-      `Max concurrent pages reached (${config.browser.maxConcurrentPages})`
-    );
+// ── Remote Browser (Browserless fallback) ────────────────────────────────────
+
+const connectRemote = async () => {
+  if (!config.browser.browserlessWsEndpoint) {
+    throw new Error('Browserless fallback requested but BROWSERLESS_WS_ENDPOINT is not set');
   }
 
-  const instance = await launch();
+  logger.info('Connecting to Browserless...');
 
-  const context = await instance.newContext({
+  const remoteBrowser = await chromium.connectOverCDP(
+    config.browser.browserlessWsEndpoint
+  );
+
+  logger.info('Connected to Browserless');
+  return remoteBrowser;
+};
+
+// ── Page Management ───────────────────────────────────────────────────────────
+
+/**
+ * Create a new page from a browser instance (local or remote)
+ */
+const newPageFromBrowser = async (browserInstance) => {
+  const context = await browserInstance.newContext({
     userAgent: config.browser.userAgent,
     viewport: { width: 1280, height: 800 },
     ignoreHTTPSErrors: true,
@@ -75,7 +84,6 @@ const newPage = async () => {
   });
 
   const page = await context.newPage();
-
   page.setDefaultTimeout(config.browser.timeout);
   page.setDefaultNavigationTimeout(config.browser.navigationTimeout);
 
@@ -83,6 +91,26 @@ const newPage = async () => {
   logger.debug({ activePages }, 'Page opened');
 
   return { page, context };
+};
+
+/**
+ * Get a page from local browser
+ */
+const newPage = async () => {
+  if (activePages >= config.browser.maxConcurrentPages) {
+    throw new Error(`Max concurrent pages reached (${config.browser.maxConcurrentPages})`);
+  }
+
+  const instance = await launch();
+  return newPageFromBrowser(instance);
+};
+
+/**
+ * Get a page from Browserless
+ */
+const newRemotePage = async () => {
+  const remoteBrowser = await connectRemote();
+  return newPageFromBrowser(remoteBrowser);
 };
 
 /**
@@ -100,9 +128,8 @@ const closePage = async (page, context) => {
   }
 };
 
-/**
- * Graceful shutdown — called on process exit
- */
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+
 const shutdown = async () => {
   if (browser) {
     logger.info('Shutting down browser...');
@@ -111,13 +138,11 @@ const shutdown = async () => {
   }
 };
 
-/**
- * Health info for the /health endpoint
- */
 const status = () => ({
   connected: browser?.isConnected() ?? false,
   activePages,
   maxPages: config.browser.maxConcurrentPages,
+  browserlesConfigured: !!config.browser.browserlessWsEndpoint,
 });
 
-module.exports = { launch, newPage, closePage, shutdown, status };
+module.exports = { launch, newPage, newRemotePage, closePage, shutdown, status };

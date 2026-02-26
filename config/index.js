@@ -18,7 +18,7 @@ const config = {
   },
 
   auth: {
-    apiKey: process.env.ICHABOD_API_KEY || null, // null = auth disabled in dev
+    apiKey: process.env.ICHABOD_API_KEY || null,
   },
 
   browser: {
@@ -30,6 +30,8 @@ const config = {
       'BROWSER_USER_AGENT',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
     ),
+    // Browserless fallback — if set, used when local Chromium fails
+    browserlessWsEndpoint: process.env.BROWSERLESS_WS_ENDPOINT || null,
   },
 
   scrape: {
