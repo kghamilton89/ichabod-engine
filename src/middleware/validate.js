@@ -26,12 +26,19 @@ const actionSchema = Joi.object({
     then: Joi.required(),
     otherwise: Joi.optional(),
   }),
-  times: Joi.number().integer().min(1).max(20).when('type', {
-    is: 'scroll',
-    then: Joi.optional(),
-    otherwise: Joi.optional(),
-  }),
+  times: Joi.number().integer().min(1).max(20).optional(),
   duration: Joi.number().integer().min(0).max(30000).optional(),
+});
+
+/**
+ * Sub-field schema for selector extractor
+ */
+const subFieldSchema = Joi.object({
+  name: Joi.string().min(1).max(64).required(),
+  selector: Joi.string().required(),
+  attribute: Joi.string()
+    .valid('text', 'href', 'src', 'value', 'innerHTML', 'outerHTML')
+    .default('text'),
 });
 
 /**
@@ -45,6 +52,12 @@ const extractFieldSchema = Joi.object({
     .default('text'),
   multiple: Joi.boolean().default(false),
   required: Joi.boolean().default(false),
+  // Required when attribute is 'selector'
+  fields: Joi.when('attribute', {
+    is: 'selector',
+    then: Joi.array().items(subFieldSchema).min(1).required(),
+    otherwise: Joi.optional(),
+  }),
 });
 
 /**
@@ -68,6 +81,7 @@ const scrapeSchema = Joi.object({
  */
 const discoverSchema = Joi.object({
   url: Joi.string().uri({ scheme: ['http', 'https'] }).required(),
+  candidates: Joi.array().items(Joi.string().uri()).optional(),
   options: Joi.object({
     timeout: Joi.number().integer().min(1000).max(60000).optional(),
     waitUntil: Joi.string()
@@ -85,6 +99,7 @@ const validate = (schema) => (req, res, next) => {
     abortEarly: false,    // Return all errors, not just the first
     stripUnknown: true,   // Remove unknown fields silently
     convert: true,        // Apply defaults and type coercion
+    allowUnknown: false,
   });
 
   if (error) {
@@ -95,7 +110,6 @@ const validate = (schema) => (req, res, next) => {
     return validationError(res, details);
   }
 
-  // Replace req.body with the validated + defaulted value
   req.body = value;
   next();
 };
