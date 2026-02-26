@@ -2,6 +2,7 @@
  * Ichabod Engine - Discovery Service
  * Fetches a page and returns cleaned HTML for LLM analysis.
  * Tries local Chromium first, falls back to Browserless on failure.
+ * Supports forceFallback option to skip straight to Browserless.
  */
 
 'use strict';
@@ -11,9 +12,6 @@ const { sanitize } = require('../utils/sanitize');
 const config = require('../../config');
 const logger = require('../utils/logger');
 
-/**
- * Core fetch logic — runs against a given page
- */
 const fetchWithPage = async (page, url, options = {}) => {
   const response = await page.goto(url, {
     waitUntil: options.waitUntil ?? 'networkidle',
@@ -29,23 +27,29 @@ const fetchWithPage = async (page, url, options = {}) => {
   return { html, rawHtml, resolvedUrl, title, statusCode };
 };
 
-/**
- * Fetch a URL and return cleaned HTML ready for LLM consumption.
- * Auto-falls back to Browserless if local Chromium fails.
- */
 const fetch = async (url, options = {}) => {
   logger.info({ url }, 'Discovery fetch started');
   const startedAt = Date.now();
 
+  const forceFallback = options.forceFallback === true;
   let page, context, usedFallback = false;
 
-  try {
-    ({ page, context } = await browser.newPage());
-  } catch (err) {
-    if (!config.browser.browserlessWsEndpoint) throw err;
-    logger.warn({ err: err.message }, 'Local browser failed — trying Browserless');
+  if (forceFallback) {
+    if (!config.browser.browserlessWsEndpoint) {
+      throw new Error('forceFallback requested but BROWSERLESS_WS_ENDPOINT is not set');
+    }
+    logger.info({ url }, 'forceFallback — going straight to Browserless');
     ({ page, context } = await browser.newRemotePage());
     usedFallback = true;
+  } else {
+    try {
+      ({ page, context } = await browser.newPage());
+    } catch (err) {
+      if (!config.browser.browserlessWsEndpoint) throw err;
+      logger.warn({ err: err.message }, 'Local browser failed — trying Browserless');
+      ({ page, context } = await browser.newRemotePage());
+      usedFallback = true;
+    }
   }
 
   try {
@@ -92,9 +96,6 @@ const fetch = async (url, options = {}) => {
   }
 };
 
-/**
- * Poll a list of candidate URLs — returns results for each
- */
 const pollCandidates = async (urls, options = {}) => {
   const results = [];
 
