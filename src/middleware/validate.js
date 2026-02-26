@@ -89,6 +89,7 @@ const discoverSchema = Joi.object({
       .valid('load', 'domcontentloaded', 'networkidle')
       .default('networkidle'),
     fullPage: Joi.boolean().default(false),
+    forceFallback: Joi.boolean().default(false),
   }).default({}),
 });
 
