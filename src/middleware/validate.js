@@ -41,7 +41,7 @@ const extractFieldSchema = Joi.object({
   name: Joi.string().min(1).max(64).required(),
   selector: Joi.string().required(),
   attribute: Joi.string()
-    .valid('text', 'href', 'src', 'value', 'innerHTML', 'outerHTML')
+    .valid('text', 'href', 'src', 'value', 'innerHTML', 'outerHTML', 'selector')
     .default('text'),
   multiple: Joi.boolean().default(false),
   required: Joi.boolean().default(false),
