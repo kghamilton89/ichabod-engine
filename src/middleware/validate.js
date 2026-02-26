@@ -73,6 +73,7 @@ const scrapeSchema = Joi.object({
     waitUntil: Joi.string()
       .valid('load', 'domcontentloaded', 'networkidle')
       .default('networkidle'),
+    forceFallback: Joi.boolean().default(false),
   }).default({}),
 });
 
